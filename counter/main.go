@@ -20,12 +20,6 @@ const updateDuration = 1 * time.Second
 
 var fatalErr error
 
-// The counter, a map of vote => count
-var counts map[string]int
-
-// The counter lock to prevent race conditions
-var countsLock sync.Mutex
-
 func fatal(e error) {
 	fmt.Println(e)
 	flag.PrintDefaults()
@@ -33,6 +27,7 @@ func fatal(e error) {
 }
 
 func main() {
+
 	defer func() {
 		if fatalErr != nil {
 			os.Exit(1)
@@ -45,13 +40,14 @@ func main() {
 		fatal(err)
 		return
 	}
-
 	defer func() {
 		log.Println("Closing database connection...")
 		db.Close()
 	}()
-
 	pollData := db.DB("ballots").C("polls")
+
+	var counts map[string]int
+	var countsLock sync.Mutex
 
 	log.Println("Connecting to nsq...")
 	q, err := nsq.NewConsumer("votes", "counter", nsq.NewConfig())
@@ -63,9 +59,6 @@ func main() {
 	q.AddHandler(nsq.HandlerFunc(func(m *nsq.Message) error {
 		countsLock.Lock()
 		defer countsLock.Unlock()
-
-		// we check if count is nil because once the DB is updated,
-		// we will to reset everything and start at zero
 		if counts == nil {
 			counts = make(map[string]int)
 		}
@@ -80,60 +73,44 @@ func main() {
 	}
 
 	log.Println("Waiting for votes on nsq...")
-
-	var updater *time.Timer
-
-	updater = time.AfterFunc(updateDuration, func() {
-		countsLock.Lock()
-		defer countsLock.Unlock()
-
-		if len(counts) == 0 {
-			log.Println("No new votes, skipping database update")
-		} else {
-			log.Println("Updating database...")
-			log.Println(counts)
-			ok := true
-
-			for option, count := range counts {
-				sel := bson.M{
-					"options": bson.M{
-						"$in": []string{option},
-					},
-				}
-
-				up := bson.M{
-					"$inc": bson.M{
-						"results." + option: count,
-					},
-				}
-
-				if _, err := pollData.UpdateAll(sel, up); err != nil {
-					log.Println("failed to update:", err)
-					ok = false
-				}
-
-			}
-
-			if ok {
-				log.Println("Finished updating database...")
-				counts = nil // reset the counter
-			}
-			updater.Reset(updateDuration)
-		}
-	})
-
+	ticker := time.NewTicker(updateDuration)
 	termChan := make(chan os.Signal, 1)
 	signal.Notify(termChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
 	for {
 		select {
+		case <-ticker.C:
+			doCount(&countsLock, &counts, pollData)
 		case <-termChan:
-			updater.Stop()
+			ticker.Stop()
 			q.Stop()
 		case <-q.StopChan:
-			//finished
+			// finished
 			return
 		}
 	}
 
+}
+
+func doCount(countsLock *sync.Mutex, counts *map[string]int, pollData *mgo.Collection) {
+	countsLock.Lock()
+	defer countsLock.Unlock()
+	if len(*counts) == 0 {
+		log.Println("No new votes, skipping database update")
+		return
+	}
+	log.Println("Updating database...")
+	log.Println(*counts)
+	ok := true
+	for option, count := range *counts {
+		sel := bson.M{"options": bson.M{"$in": []string{option}}}
+		up := bson.M{"$inc": bson.M{"results." + option: count}}
+		if _, err := pollData.UpdateAll(sel, up); err != nil {
+			log.Println("failed to update:", err)
+			ok = false
+		}
+	}
+	if ok {
+		log.Println("Finished updating database...")
+		*counts = nil // reset counts
+	}
 }

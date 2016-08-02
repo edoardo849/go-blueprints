@@ -48,3 +48,29 @@ To Load data into ElasticSearch
 https://hub.docker.com/r/willdurand/elk/
 http://williamdurand.fr/2014/12/17/elasticsearch-logstash-kibana-with-docker/
 https://www.elastic.co/blog/how-to-make-a-dockerfile-for-elasticsearch
+
+
+## Key issues
+- Execution pipeline
+- Share data between handlers
+- Best practices for writing handlers responsivle for exposing data
+- Room for future implementations
+- Prevent adding dependencies on external packages
+
+### RESTful API design
+- HTTP methods describe the kind of action to take. GET is to read, POST is to create, UPDATE is to update, DELETE is to delete.
+- Data is expressed as a collection of resources
+- Actions are expressed as changes to data
+- URLs are used to refer to specific data
+- HTTP headers are used to describe the kind of representation coming into and going out of the server
+
+## Sharing data between handlers
+Goal: keep our handlers as pure as the `http.Handler` interface from the Go Library.
+
+```go
+type HandlerFunc func(http.ResponseWriter, *http.Request)
+```
+
+therefore, we cannot create and manage database session objects in one place and pass them into our handlers.
+
+We are going to create an in-memory map of per-request data, and provide an easy way for handlers to access it.

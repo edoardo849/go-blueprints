@@ -1,145 +1,202 @@
 package main
 
 import (
-	"fmt"
+	"bufio"
+	"encoding/json"
+	"io"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
-	"sync"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/bitly/go-nsq"
 	"github.com/joeshaw/envdecode"
+	"github.com/matryer/go-oauth/oauth"
 	"gopkg.in/mgo.v2"
 )
 
-func main() {
-	var stoplock sync.Mutex
-	stop := false
-
-	stopChan := make(chan struct{}, 1)
-	signalChan := make(chan os.Signal, 1)
-	go func() {
-		// wait-block until a signal is sent through
-		<-signalChan
-		stoplock.Lock()
-		stop = true
-		stoplock.Unlock()
-		log.Println("Stopping...")
-		stopChan <- struct{}{}
-		closeConn()
-	}()
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := dialdb(); err != nil {
-		log.Fatalln("failed to dial MongoDB: ", err)
-	}
-	defer closedb()
-
-	votes := make(chan string)
-	publisherStoppedChan := publishVotes(votes)
-
-	twitterStoppedChan := startTwitterStream(stopChan, votes)
-	go func() {
-		for {
-			time.Sleep(1 * time.Minute)
-			closeConn()
-			stoplock.Lock()
-			if stop {
-				stoplock.Unlock()
-				break
-			}
-			stoplock.Unlock()
-		}
-	}()
-	<-twitterStoppedChan
-	close(votes)
-	<-publisherStoppedChan
-
-	fmt.Println("hello")
-}
-
-func publishVotes(votes <-chan string) <-chan struct{} {
-	stopchan := make(chan struct{}, 1)
-	pub, _ := nsq.NewProducer("192.168.99.100:4150", nsq.NewConfig())
-
-	go func() {
-
-		// continue to pull values from the channel. When the channel has no
-		// values the execution will be blocked until a values comes down again.
-		// If the votes channel is closed, the loop will exit.
-		// https://www.youtube.com/watch?v=SmoM1InWXr0
-		for vote := range votes {
-			pub.Publish("votes", []byte(vote)) // publish the vote to the queue
-		}
-		log.Println("Publisher: Stopping")
-		pub.Stop()
-		log.Println("Publisher: Stopped")
-		stopchan <- struct{}{}
-	}()
-	return stopchan
-}
+var (
+	authClient *oauth.Client
+	creds      *oauth.Credentials
+	conn       net.Conn
+)
 
 type poll struct {
 	Options []string
 }
+type tweet struct {
+	Text string
+}
 
-func loadOptions() ([]string, error) {
-	var options []string
+var reader io.ReadCloser
 
-	// Memory-efficient way to of reading the poll data because it only
-	// ever uses a single `poll` object. If we were to use the `All` method
-	// instead, the amount of memory we'd use would depend on the number of
-	// polls we had in our database, which woulf be out of control.
-	iter := db.DB("ballots").C("polls").Find(nil).Iter()
-	var p poll
-
-	for iter.Next(&p) {
-		// append is a `variadic` function
-		options = append(options, p.Options...)
+func closeConn() {
+	if conn != nil {
+		conn.Close()
 	}
-
-	// cleanup any used memory on the iterator
-	iter.Close()
-
-	return options, iter.Err()
+	if reader != nil {
+		reader.Close()
+	}
 }
 
-// ======
-// MongoDB
-// ======
-var (
-	dbSetupOnce sync.Once
-	db          *mgo.Session
-)
-
-func dialdb() error {
-	var err error
-
-	mongoAddr := fmt.Sprintf("%s:%s", dbCreds.Address, dbCreds.Port)
-	log.Println("dialing mongodb: ", mongoAddr)
-
-	dbSetupOnce.Do(func() {
-		setupdb()
-		db, err = mgo.Dial(mongoAddr)
-	})
-
-	return err
-}
-
-func closedb() {
-	db.Close()
-	log.Println("closed database connection")
-}
-
-var dbCreds struct {
-	Port    string `env:"SP_MONGO_PORT,required"`
-	Address string `env:"SP_MONGO_ADDRESS,required"`
-}
-
-func setupdb() {
-	if err := envdecode.Decode(&dbCreds); err != nil {
+func main() {
+	var ts struct {
+		ConsumerKey    string `env:"SP_TWITTER_KEY,required"`
+		ConsumerSecret string `env:"SP_TWITTER_SECRET,required"`
+		AccessToken    string `env:"SP_TWITTER_ACCESSTOKEN,required"`
+		AccessSecret   string `env:"SP_TWITTER_ACCESSSECRET,required"`
+	}
+	if err := envdecode.Decode(&ts); err != nil {
 		log.Fatalln(err)
 	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(netw, addr string) (net.Conn, error) {
+				if conn != nil {
+					conn.Close()
+					conn = nil
+				}
+				netc, err := net.DialTimeout(netw, addr, 5*time.Second)
+				if err != nil {
+					return nil, err
+				}
+				conn = netc
+				return netc, nil
+			},
+		},
+	}
+	creds = &oauth.Credentials{
+		Token:  ts.AccessToken,
+		Secret: ts.AccessSecret,
+	}
+	authClient = &oauth.Client{
+		Credentials: oauth.Credentials{
+			Token:  ts.ConsumerKey,
+			Secret: ts.ConsumerSecret,
+		},
+	}
+	twitterStopChan := make(chan struct{}, 1)
+	publisherStopChan := make(chan struct{}, 1)
+	stop := false
+	signalChan := make(chan os.Signal, 1)
+	go func() {
+		<-signalChan
+		stop = true
+		log.Println("Stopping...")
+		closeConn()
+	}()
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	votes := make(chan string) // chan for votes
+	go func() {
+		log.Println("Connecting to NSQ...")
+		pub, _ := nsq.NewProducer("192.168.99.100:4150", nsq.NewConfig())
+		log.Println("Connected")
+		for vote := range votes {
+			pub.Publish("votes", []byte(vote)) // publish vote
+		}
+		log.Println("Publisher: Stopping")
+		pub.Stop()
+		log.Println("Publisher: Stopped")
+		publisherStopChan <- struct{}{}
+	}()
+	go func() {
+		defer func() {
+			twitterStopChan <- struct{}{}
+		}()
+		for {
+			if stop {
+				log.Println("Twitter: Stopped")
+				return
+			}
+			time.Sleep(2 * time.Second) // calm
+			var options []string
+			db, err := mgo.Dial("192.168.99.100")
+			if err != nil {
+				log.Fatalln(err)
+			}
+			iter := db.DB("ballots").C("polls").Find(nil).Iter()
+			var p poll
+			for iter.Next(&p) {
+				options = append(options, p.Options...)
+			}
+			iter.Close()
+			db.Close()
+
+			hashtags := make([]string, len(options))
+			for i := range options {
+				hashtags[i] = "#" + strings.ToLower(options[i])
+			}
+
+			form := url.Values{"track": {strings.Join(hashtags, ",")}}
+			formEnc := form.Encode()
+
+			u, _ := url.Parse("https://stream.twitter.com/1.1/statuses/filter.json")
+			req, err := http.NewRequest("POST", u.String(), strings.NewReader(formEnc))
+			if err != nil {
+				log.Println("creating filter request failed:", err)
+			}
+			req.Header.Set("Authorization", authClient.AuthorizationHeader(creds, "POST", u, form))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Content-Length", strconv.Itoa(len(formEnc)))
+
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Println("Error getting response:", err)
+				continue
+			}
+			if resp.StatusCode != http.StatusOK {
+				// this is a nice way to see what the error actually is:
+				s := bufio.NewScanner(resp.Body)
+				s.Scan()
+				log.Println(s.Text())
+				log.Println(hashtags)
+				log.Println("StatusCode =", resp.StatusCode)
+				continue
+			}
+
+			reader = resp.Body
+			decoder := json.NewDecoder(reader)
+			for {
+				var t tweet
+				if err := decoder.Decode(&t); err == nil {
+					for _, option := range options {
+						if strings.Contains(
+							strings.ToLower(t.Text),
+							strings.ToLower(option),
+						) {
+							log.Println("vote:", option)
+							votes <- option
+						}
+					}
+				} else {
+					break
+				}
+			}
+
+		}
+
+	}()
+
+	// update by forcing the connection to close
+	go func() {
+		for {
+			time.Sleep(1 * time.Minute)
+			closeConn()
+			if stop {
+				break
+			}
+		}
+	}()
+
+	<-twitterStopChan // important to avoid panic
+	close(votes)
+	<-publisherStopChan
+
 }
