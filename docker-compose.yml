@@ -1,0 +1,36 @@
+version: '2'
+services:
+  nsqlookupd:
+    image: nsqio/nsq
+    command: /nsqlookupd
+    ports:
+      - "4160:4160"
+      - "4161:4161"
+  nsqd:
+    image: nsqio/nsq
+    command: /nsqd --lookupd-tcp-address=192.168.99.100:4160
+    ports:
+      - "4150:4150"
+      - "4151:4151"
+  nsqadmin:
+    image: nsqio/nsq
+    command: /nsqadmin --lookupd-http-address=192.168.99.100:4161
+    ports:
+      - "4171:4171"
+  db:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+  elk:
+    image: willdurand/elk
+    ports:
+        - "8080:80"
+        - "9200:9200"
+    volumes:
+        - ~/go-edoardo849/go-blueprints-socialpoll/volumes/logstash/config:/etc/logstash
+    volumes_from:
+        - dataelk
+  dataelk:
+    image: busybox
+    volumes:
+        - ~/go-edoardo849/go-blueprints-socialpoll/volumes/elasticsearch/data:/data
