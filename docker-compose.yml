@@ -8,7 +8,7 @@ services:
       - "4161:4161"
   nsqd:
     image: nsqio/nsq
-    command: /nsqd --lookupd-tcp-address=192.168.99.100:4160
+    command: /nsqd --lookupd-tcp-address=192.168.99.100:4160 --broadcast-address=192.168.99.100
     ports:
       - "4150:4150"
       - "4151:4151"

@@ -117,11 +117,12 @@ var (
 func dialdb() error {
 	var err error
 
-	log.Println("dialing mongodb: localhost")
+	mongoAddr := fmt.Sprintf("%s:%s", dbCreds.Address, dbCreds.Port)
+	log.Println("dialing mongodb: ", mongoAddr)
 
 	dbSetupOnce.Do(func() {
 		setupdb()
-		db, err = mgo.Dial(fmt.Sprintf("%s:%s", dbCreds.Address, dbCreds.Port))
+		db, err = mgo.Dial(mongoAddr)
 	})
 
 	return err

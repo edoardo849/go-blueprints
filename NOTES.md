@@ -31,13 +31,13 @@ To run the program first create a topic in Mongo
 ```bash
 mongo
 use ballots
-db.polls.insert({"title":"Test Polll", "options":["happy", "sad", "fail", "win"]})
+db.polls.insert({"title":"US Election", "options":["Trump", "Clinton"]})
 ```
 
 Connect to the container using Kitematic GUI... easier... then on the admin nsq type
 
 ```bash
-nsq_tail --topic="votes" --lookupd-http-address=192.168.99.100:4161
+nsq_tail --topic="votes" --lookupd-http-address=192.168.99.100:4161 --broadcast-address=192.168.99.100
 ```
 then load the environment variables
 ```bash
@@ -46,4 +46,5 @@ make
 ```
 To Load data into ElasticSearch
 https://hub.docker.com/r/willdurand/elk/
+http://williamdurand.fr/2014/12/17/elasticsearch-logstash-kibana-with-docker/
 https://www.elastic.co/blog/how-to-make-a-dockerfile-for-elasticsearch
