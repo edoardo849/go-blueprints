@@ -21,16 +21,26 @@ services:
     image: mongo:latest
     ports:
       - "27017:27017"
-  elk:
-    image: willdurand/elk
+  elasticsearch:
+    build: docker/elasticsearch/
+    command: elasticsearch -Des.network.host=0.0.0.0
     ports:
-        - "8080:80"
-        - "9200:9200"
+      - "9200:9200"
+      - "9300:9300"
+  logstash:
+    build: docker/logstash/
+    command: logstash -f /etc/logstash/conf.d/logstash.conf
     volumes:
-        - ~/go-edoardo849/go-blueprints-socialpoll/volumes/logstash/config:/etc/logstash
-    volumes_from:
-        - dataelk
-  dataelk:
-    image: busybox
+      - ./docker/logstash/config:/etc/logstash/conf.d
+    ports:
+      - "5000:5000"
+    links:
+      - elasticsearch
+  kibana:
+    build: docker/kibana/
     volumes:
-        - ~/go-edoardo849/go-blueprints-socialpoll/volumes/elasticsearch/data:/data
+      - ./docker/kibana/config/:/opt/kibana/config/
+    ports:
+      - "5601:5601"
+    links:
+      - elasticsearch

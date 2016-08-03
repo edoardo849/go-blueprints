@@ -45,13 +45,31 @@ func withCORS(fn http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// this pattern https://medium.com/@matryer/context-keys-in-go-5312346a868d#.lrgjb2hj6
+// is for sharing state only.
 type contextKey struct {
 	name string
 }
 
 var contextKeyAPIKey = &contextKey{"api-key"}
 
-// APIKey nsdad
+// APIKey is a helper function that is getting the value
+// for the user
+// An alternative patter, is to keep completely private the api key
+// by returning the resource. In this example, a User
+//```go
+// func User(ctx context.Context) (*User, error) {
+//    tok, ok := authTokenFromContext(ctx)
+//    if !ok {
+//        return nil, ErrNoUser
+//    }
+//    user, err := LookupUserByToken(ctx, tok)
+//    if err != nil {
+//        return nil, err
+//    }
+//    return user, nil
+//}
+//```
 func APIKey(ctx context.Context) (string, bool) {
 	key := ctx.Value(contextKeyAPIKey)
 	if key == nil {
@@ -69,6 +87,8 @@ func withAPIKey(fn http.HandlerFunc) http.HandlerFunc {
 			respondErr(w, r, http.StatusUnauthorized, "invalid API key")
 			return
 		}
+		// through the decorator pattern, we are adding context to our
+		// handlers.
 		ctx := context.WithValue(r.Context(), contextKeyAPIKey, key)
 		fn(w, r.WithContext(ctx))
 	}
