@@ -30,6 +30,10 @@ var (
 type poll struct {
 	Options []string
 }
+type topic struct {
+	Topic string
+	Tweet tweet
+}
 type tweet struct {
 	Text string
 }
@@ -94,13 +98,31 @@ func main() {
 	}()
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 	votes := make(chan string) // chan for votes
+	topics := make(chan topic) // chan for tweet
+
 	go func() {
 		log.Println("Connecting to NSQ...")
 		pub, _ := nsq.NewProducer("192.168.99.100:4150", nsq.NewConfig())
 		log.Println("Connected")
-		for vote := range votes {
-			pub.Publish("votes", []byte(vote)) // publish vote
+
+		for {
+			if stop {
+				log.Println("NSQ: Interrupted")
+				break
+			}
+			select {
+			case vote := <-votes:
+				pub.Publish("votes", []byte(vote)) // publish vote
+			case tp := <-topics:
+				json, err := json.Marshal(tp)
+				if err != nil {
+					log.Println("Error in Marshaling")
+					break
+				}
+				pub.Publish("topics", json) // publish vote
+			}
 		}
+
 		log.Println("Publisher: Stopping")
 		pub.Stop()
 		log.Println("Publisher: Stopped")
@@ -121,6 +143,7 @@ func main() {
 			if err != nil {
 				log.Fatalln(err)
 			}
+
 			iter := db.DB("ballots").C("polls").Find(nil).Iter()
 			var p poll
 			for iter.Next(&p) {
@@ -130,7 +153,7 @@ func main() {
 			db.Close()
 
 			hashtags := make([]string, len(options))
-			for i := range options {
+			for i := range options { //every option should be a seperate type in ES
 				hashtags[i] = "#" + strings.ToLower(options[i])
 			}
 
@@ -173,6 +196,7 @@ func main() {
 						) {
 							log.Println("vote:", option)
 							votes <- option
+							topics <- topic{option, t}
 						}
 					}
 				} else {
@@ -197,6 +221,8 @@ func main() {
 
 	<-twitterStopChan // important to avoid panic
 	close(votes)
+	close(topics)
+
 	<-publisherStopChan
 
 }

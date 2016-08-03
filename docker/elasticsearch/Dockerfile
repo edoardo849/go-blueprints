@@ -1,4 +1,7 @@
 FROM elasticsearch:latest
 
-# Add your logstash plugins setup here
-# Example: RUN logstash-plugin install logstash-filter-json
+# Install license
+RUN /usr/share/elasticsearch/bin/plugin install --batch license
+
+# Install graph
+RUN /usr/share/elasticsearch/bin/plugin install --batch graph
